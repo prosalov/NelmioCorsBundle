@@ -11,13 +11,12 @@
 
 namespace Nelmio\CorsBundle\EventListener;
 
-use Symfony\Component\HttpKernel\HttpKernelInterface;
+use Nelmio\CorsBundle\Options\ResolverInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
-use Symfony\Component\HttpKernel\Event\FilterResponseEvent;
-use Symfony\Component\HttpKernel\Event\GetResponseEvent;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
-use Nelmio\CorsBundle\Options\ResolverInterface;
+use Symfony\Component\HttpKernel\Event\RequestEvent;
+use Symfony\Component\HttpKernel\Event\ResponseEvent;
+use Symfony\Component\HttpKernel\HttpKernelInterface;
 
 /**
  * Adds CORS headers and handles pre-flight requests
@@ -26,6 +25,9 @@ use Nelmio\CorsBundle\Options\ResolverInterface;
  */
 class CorsListener
 {
+    const SHOULD_ALLOW_ORIGIN_ATTR = '_nelmio_cors_should_allow_origin';
+    const SHOULD_FORCE_ORIGIN_ATTR = '_nelmio_cors_should_force_origin';
+
     /**
      * Simple headers as defined in the spec should always be accepted
      */
@@ -36,18 +38,15 @@ class CorsListener
         'origin',
     );
 
-    protected $dispatcher;
-
     /** @var ResolverInterface */
     protected $configurationResolver;
 
-    public function __construct(EventDispatcherInterface $dispatcher, ResolverInterface $configurationResolver)
+    public function __construct(ResolverInterface $configurationResolver)
     {
-        $this->dispatcher = $dispatcher;
         $this->configurationResolver = $configurationResolver;
     }
 
-    public function onKernelRequest(GetResponseEvent $event)
+    public function onKernelRequest(RequestEvent $event)
     {
         if (HttpKernelInterface::MASTER_REQUEST !== $event->getRequestType()) {
             return;
@@ -61,7 +60,7 @@ class CorsListener
 
         // if the "forced_allow_origin_value" option is set, add a listener which will set or override the "Access-Control-Allow-Origin" header
         if (!empty($options['forced_allow_origin_value'])) {
-            $this->dispatcher->addListener('kernel.response', array($this, 'forceAccessControlAllowOriginHeader'), -1);
+            $request->attributes->set(self::SHOULD_FORCE_ORIGIN_ATTR, true);
         }
 
         // skip if not a CORS request
@@ -80,37 +79,43 @@ class CorsListener
             return;
         }
 
-        $this->dispatcher->addListener('kernel.response', array($this, 'onKernelResponse'), 0);
+        $request->attributes->set(self::SHOULD_ALLOW_ORIGIN_ATTR, true);
     }
 
-    public function onKernelResponse(FilterResponseEvent $event)
+    public function onKernelResponse(ResponseEvent $event)
     {
         if (HttpKernelInterface::MASTER_REQUEST !== $event->getRequestType()) {
             return;
         }
 
-        if (!$options = $this->configurationResolver->getOptions($request = $event->getRequest())) {
+        $request = $event->getRequest();
+
+        $shouldAllowOrigin = $request->attributes->getBoolean(self::SHOULD_ALLOW_ORIGIN_ATTR);
+        $shouldForceOrigin = $request->attributes->getBoolean(self::SHOULD_FORCE_ORIGIN_ATTR);
+
+        if (!$shouldAllowOrigin && !$shouldForceOrigin) {
             return;
         }
 
-        $response = $event->getResponse();
-        // add CORS response headers
-        $response->headers->set('Access-Control-Allow-Origin', $request->headers->get('Origin'));
-        if ($options['allow_credentials']) {
-            $response->headers->set('Access-Control-Allow-Credentials', 'true');
-        }
-        if ($options['expose_headers']) {
-            $response->headers->set('Access-Control-Expose-Headers', strtolower(implode(', ', $options['expose_headers'])));
-        }
-    }
-
-    public function forceAccessControlAllowOriginHeader(FilterResponseEvent $event)
-    {
-        if (!$options = $this->configurationResolver->getOptions($request = $event->getRequest())) {
+        if (!$options = $this->configurationResolver->getOptions($request)) {
             return;
         }
 
-        $event->getResponse()->headers->set('Access-Control-Allow-Origin', $options['forced_allow_origin_value']);
+        if ($shouldAllowOrigin) {
+            $response = $event->getResponse();
+            // add CORS response headers
+            $response->headers->set('Access-Control-Allow-Origin', $request->headers->get('Origin'));
+            if ($options['allow_credentials']) {
+                $response->headers->set('Access-Control-Allow-Credentials', 'true');
+            }
+            if ($options['expose_headers']) {
+                $response->headers->set('Access-Control-Expose-Headers', strtolower(implode(', ', $options['expose_headers'])));
+            }
+        }
+
+        if ($shouldForceOrigin) {
+            $event->getResponse()->headers->set('Access-Control-Allow-Origin', $options['forced_allow_origin_value']);
+        }
     }
 
     protected function getPreflightResponse(Request $request, array $options)
